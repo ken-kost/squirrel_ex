@@ -80,17 +80,21 @@ defmodule SquirrelEx.Codegen do
   end
 
   # A machine-readable metadata accessor for downstream tooling (e.g. an Ash
-  # extension): the raw SQL, the parameters, and the columns with their types,
-  # nullability, and enum variants. Avoids re-introspecting or parsing the source.
+  # extension): the raw SQL, the parameters, and the columns with their Elixir
+  # typespec, the closest Ecto type, nullability, and enum variants. The `:ecto`
+  # field matters where the typespec is lossy — e.g. a `uuid` column has typespec
+  # `"String.t()"` but ecto `Ecto.UUID`, and Postgrex hands back a 16-byte binary.
+  # Avoids re-introspecting or parsing the generated source.
   defp squirrel_meta(%Query{} = query) do
     params =
       Enum.map_join(query.params, ", ", fn p ->
-        "%{name: #{inspect(p.name)}, type: #{inspect(p.typespec)}}"
+        "%{name: #{inspect(p.name)}, type: #{inspect(p.typespec)}, ecto: #{render_ecto(p.ecto)}}"
       end)
 
     columns =
       Enum.map_join(query.columns, ", ", fn c ->
-        "%{name: #{inspect(c.key)}, type: #{inspect(c.typespec)}, nullable: #{c.nullable}, enum: #{inspect(c.enum)}}"
+        "%{name: #{inspect(c.key)}, type: #{inspect(c.typespec)}, ecto: #{render_ecto(c.ecto)}, " <>
+          "nullable: #{c.nullable}, enum: #{inspect(c.enum)}}"
       end)
 
     """
@@ -102,6 +106,11 @@ defmodule SquirrelEx.Codegen do
       end
     """
   end
+
+  # Renders an Ecto type as a literal in the generated source. `inspect/1`
+  # produces valid Elixir for the values Oid emits: atoms (`:integer`), modules
+  # (`Ecto.UUID`, `Ecto.Enum`), `{:array, _}` tuples, and `nil`.
+  defp render_ecto(ecto), do: inspect(ecto)
 
   defp moduledoc(%Query{doc: nil} = query) do
     inspect("Generated from `#{query.rel_path}`.")

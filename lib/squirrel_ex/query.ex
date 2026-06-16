@@ -38,9 +38,10 @@ defmodule SquirrelEx.Query do
           typespec: String.t(),
           nullable: boolean(),
           decoder: Type.decoder(),
-          enum: [String.t()] | nil
+          enum: [String.t()] | nil,
+          ecto: term()
         }
-  @type param :: %{name: String.t(), typespec: String.t()}
+  @type param :: %{name: String.t(), typespec: String.t(), ecto: term()}
   @type directives :: %{optional(:one) => boolean()}
 
   @type t :: %__MODULE__{
@@ -151,11 +152,13 @@ defmodule SquirrelEx.Query do
 
     specs =
       case Keyword.fetch(opts, :param_types) do
-        {:ok, types} -> Enum.map(types, &Type.input_typespec/1)
-        :error -> Keyword.fetch!(opts, :param_typespecs)
+        {:ok, types} -> Enum.map(types, &{Type.input_typespec(&1), &1.ecto})
+        :error -> Enum.map(Keyword.fetch!(opts, :param_typespecs), &{&1, nil})
       end
 
-    Enum.zip_with(names, specs, fn name, spec -> %{name: name, typespec: spec} end)
+    Enum.zip_with(names, specs, fn name, {spec, ecto} ->
+      %{name: name, typespec: spec, ecto: ecto}
+    end)
   end
 
   defp build_columns(opts, annotations, default_nullable) do
@@ -165,7 +168,7 @@ defmodule SquirrelEx.Query do
     [columns, verdicts]
     |> Enum.zip()
     |> Enum.map(fn {{name, type}, verdict} ->
-      {base, decoder, enum} = base_and_decoder(type)
+      {base, decoder, enum, ecto} = base_and_decoder(type)
       nullable? = nullable?(name, annotations, verdict, default_nullable)
 
       %{
@@ -173,15 +176,16 @@ defmodule SquirrelEx.Query do
         typespec: if(nullable?, do: base <> " | nil", else: base),
         nullable: nullable?,
         decoder: decoder,
-        enum: enum
+        enum: enum,
+        ecto: ecto
       }
     end)
   end
 
-  defp base_and_decoder(%Type{typespec: spec, decoder: decoder, enum: enum}),
-    do: {spec, decoder, enum}
+  defp base_and_decoder(%Type{typespec: spec, decoder: decoder, enum: enum, ecto: ecto}),
+    do: {spec, decoder, enum, ecto}
 
-  defp base_and_decoder(spec) when is_binary(spec), do: {spec, :identity, nil}
+  defp base_and_decoder(spec) when is_binary(spec), do: {spec, :identity, nil, nil}
 
   # Resolution order: explicit annotation > EXPLAIN verdict > default.
   defp nullable?(name, annotations, verdict, default_nullable) do

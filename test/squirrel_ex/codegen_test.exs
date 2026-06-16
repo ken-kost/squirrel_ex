@@ -149,27 +149,35 @@ defmodule SquirrelEx.CodegenTest do
   end
 
   test "every module exposes a machine-readable __squirrel__/0 accessor" do
-    enum = %Type{typespec: ":draft | :published", decoder: :enum, enum: ["draft", "published"]}
+    enum = %Type{
+      typespec: ":draft | :published",
+      decoder: :enum,
+      enum: ["draft", "published"],
+      ecto: Ecto.Enum
+    }
 
     source =
       build(
         clean_sql: "select id, status from posts where author_id = $1",
         param_names: ["author_id"],
-        param_typespecs: ["integer()"],
-        columns: [{"id", "String.t()"}, {"status", enum}],
+        param_types: [Type.simple("integer()", :integer)],
+        # `id` is a uuid: the typespec is lossy (String.t()) but ecto carries Ecto.UUID.
+        columns: [{"id", Type.simple("String.t()", Ecto.UUID)}, {"status", enum}],
         nullability: [:not_null, :nullable]
       )
       |> Codegen.generate()
 
     assert source =~ "def __squirrel__ do"
-    assert source =~ "%{name: \"author_id\", type: \"integer()\"}"
-    assert source =~ "%{name: \"id\", type: \"String.t()\", nullable: false, enum: nil}"
+    assert source =~ "%{name: \"author_id\", type: \"integer()\", ecto: :integer}"
     assert source =~ "enum: [\"draft\", \"published\"]"
 
     [{_row, _}, {mod, _}] = compile_unique(source)
     meta = mod.__squirrel__()
-    assert meta.params == [%{name: "author_id", type: "integer()"}]
-    assert hd(meta.columns).name == "id"
+    assert meta.params == [%{name: "author_id", type: "integer()", ecto: :integer}]
+
+    # The uuid column keeps its Ecto type even though the typespec is String.t().
+    assert %{name: "id", type: "String.t()", ecto: Ecto.UUID, nullable: false} = hd(meta.columns)
+    assert Enum.at(meta.columns, 1).ecto == Ecto.Enum
   end
 
   test "mode: :metadata emits types + __squirrel__/0 but no run/N" do

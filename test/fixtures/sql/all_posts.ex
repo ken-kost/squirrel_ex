@@ -31,9 +31,9 @@ defmodule SquirrelEx.Test.Sql.AllPosts do
       sql: @sql,
       params: [],
       columns: [
-        %{name: "id", type: "String.t()", nullable: false, enum: nil},
-        %{name: "title", type: "String.t()", nullable: false, enum: nil},
-        %{name: "body", type: "String.t() | nil", nullable: true, enum: nil}
+        %{name: "id", type: "String.t()", ecto: Ecto.UUID, nullable: false, enum: nil},
+        %{name: "title", type: "String.t()", ecto: :string, nullable: false, enum: nil},
+        %{name: "body", type: "String.t() | nil", ecto: :string, nullable: true, enum: nil}
       ]
     }
   end

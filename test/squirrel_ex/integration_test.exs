@@ -183,6 +183,37 @@ defmodule SquirrelEx.IntegrationTest do
     assert {:ok, nil} = mod.run(Repo, Ecto.UUID.bingenerate())
   end
 
+  test "metadata mode exposes the Ecto type for lossy typespecs (uuid)", ctx do
+    namespace = "SquirrelEx.Gen#{System.unique_integer([:positive])}"
+
+    write_sql(ctx.dir, "ids.sql", "select id, author_id from posts where id = $1")
+
+    assert {:ok, _} =
+             SquirrelEx.run(
+               sql_paths: [Path.join(ctx.dir, "ids.sql")],
+               namespace: namespace,
+               connection: @connection,
+               manifest: ctx.manifest,
+               cwd: ctx.dir,
+               mode: :metadata
+             )
+
+    ex_path = Path.join(ctx.dir, "ids.ex")
+    source = File.read!(ex_path)
+    refute source =~ "def run("
+
+    mod = Module.concat(namespace, "Ids")
+    Code.compile_file(ex_path)
+
+    meta = mod.__squirrel__()
+    # The param and column are uuid/int: typespecs are lossy but ecto is precise.
+    assert [%{name: "id", ecto: Ecto.UUID}] = meta.params
+    id_col = Enum.find(meta.columns, &(&1.name == "id"))
+    assert id_col.type == "String.t()"
+    assert id_col.ecto == Ecto.UUID
+    assert Enum.find(meta.columns, &(&1.name == "author_id")).ecto == :integer
+  end
+
   test "refuses to clobber a generated file that lacks the squirrel_ex header", ctx do
     namespace = "SquirrelEx.Gen#{System.unique_integer([:positive])}"
     sql_path = write_sql(ctx.dir, "guarded.sql", "select id from posts")

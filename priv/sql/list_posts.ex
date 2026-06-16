@@ -29,11 +29,11 @@ defmodule MyApp.Sql.ListPosts do
   def __squirrel__ do
     %{
       sql: @sql,
-      params: [%{name: "author_id", type: "integer()"}],
+      params: [%{name: "author_id", type: "integer()", ecto: :integer}],
       columns: [
-        %{name: "id", type: "String.t()", nullable: false, enum: nil},
-        %{name: "title", type: "String.t()", nullable: false, enum: nil},
-        %{name: "body", type: "String.t() | nil", nullable: true, enum: nil}
+        %{name: "id", type: "String.t()", ecto: Ecto.UUID, nullable: false, enum: nil},
+        %{name: "title", type: "String.t()", ecto: :string, nullable: false, enum: nil},
+        %{name: "body", type: "String.t() | nil", ecto: :string, nullable: true, enum: nil}
       ]
     }
   end

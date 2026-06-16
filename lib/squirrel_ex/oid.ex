@@ -199,7 +199,7 @@ defmodule SquirrelEx.Oid do
           typespec: union,
           input: "String.t()",
           decoder: :enum,
-          ecto: {:parameterized, Ecto.Enum, %{}},
+          ecto: Ecto.Enum,
           enum: variants
         }
     end
