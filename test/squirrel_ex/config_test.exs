@@ -49,4 +49,61 @@ defmodule SquirrelEx.ConfigTest do
     assert opts[:username] == "postgres"
     assert opts[:hostname] == "localhost"
   end
+
+  test "row_type defaults to :struct" do
+    assert Config.row_type() == :struct
+    Application.put_env(:squirrel_ex, :row_type, :map)
+    assert Config.row_type() == :map
+  end
+
+  test "mode defaults to :full" do
+    assert Config.mode() == :full
+    Application.put_env(:squirrel_ex, :mode, :metadata)
+    assert Config.mode() == :metadata
+  end
+
+  test "type_overrides merges the timestamp_type shortcut" do
+    assert Config.type_overrides() == %{}
+    Application.put_env(:squirrel_ex, :timestamp_type, :naive_datetime)
+    assert Config.type_overrides() == %{"timestamptz" => "NaiveDateTime.t()"}
+  end
+
+  test "targets/0 returns a single default target from flat config" do
+    Application.put_env(:squirrel_ex, :namespace, "Flat.Sql")
+    assert [target] = Config.targets()
+    assert target.key == :default
+    assert target.namespace == "Flat.Sql"
+    assert target.row_type == :struct
+    assert target.mode == :full
+    assert target.repo == nil
+  end
+
+  test "targets/0 fans out over :repos, inheriting top-level defaults" do
+    Application.put_env(:squirrel_ex, :default_nullable, true)
+
+    Application.put_env(:squirrel_ex, :repos,
+      primary: [namespace: "App.Primary", sql_paths: ["a/*.sql"], connection: [database: "p"]],
+      analytics: [
+        namespace: "App.Analytics",
+        sql_paths: ["b/*.sql"],
+        connection: [database: "a"],
+        row_type: :map
+      ]
+    )
+
+    assert [primary, analytics] = Config.targets()
+    assert primary.key == :primary
+    assert primary.namespace == "App.Primary"
+    assert primary.default_nullable == true
+    assert primary.row_type == :struct
+    assert analytics.key == :analytics
+    assert analytics.row_type == :map
+    assert analytics.connection == [database: "a"]
+  end
+
+  test "bake_repo bakes the configured repo into the target" do
+    Application.put_env(:squirrel_ex, :repo, MyApp.Repo)
+    Application.put_env(:squirrel_ex, :bake_repo, true)
+    assert [%{repo: MyApp.Repo}] = Config.targets()
+  end
 end

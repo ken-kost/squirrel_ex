@@ -31,6 +31,32 @@ if db_available? do
     []
   )
 
+  Postgrex.query!(
+    conn,
+    "create table if not exists authors (id serial primary key, name text not null, bio text)",
+    []
+  )
+
+  # Enum type + table for enum-decoding tests.
+  Postgrex.query!(
+    conn,
+    "do $$ begin create type widget_state as enum ('draft', 'published', 'archived'); exception when duplicate_object then null; end $$",
+    []
+  )
+
+  Postgrex.query!(
+    conn,
+    "create table if not exists widgets (id serial primary key, state widget_state not null)",
+    []
+  )
+
+  # Array column for array-typing tests.
+  Postgrex.query!(
+    conn,
+    "create table if not exists taglists (id serial primary key, tags text[] not null)",
+    []
+  )
+
   GenServer.stop(conn)
 
   {:ok, _} = SquirrelEx.Test.Repo.start_link()

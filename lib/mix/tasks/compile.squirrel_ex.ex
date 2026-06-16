@@ -27,37 +27,63 @@ defmodule Mix.Tasks.Compile.SquirrelEx do
 
   @impl true
   def run(_argv) do
+    targets = Config.targets()
+
     {status, diagnostics} =
-      SquirrelEx.run(
-        sql_paths: Config.sql_paths(),
-        namespace: Config.namespace(),
-        connection: Config.connection_opts(),
-        default_nullable: Config.default_nullable?(),
-        manifest: manifest_path(),
-        cwd: File.cwd!()
-      )
+      Enum.reduce(targets, {:noop, []}, fn target, {status, diags} ->
+        {s, d} = SquirrelEx.run(target_opts(target))
+        {merge_status(status, s), diags ++ d}
+      end)
 
     diagnostics = diagnostics ++ elixirc_paths_warnings(status)
     Enum.each(diagnostics, &print_diagnostic/1)
     {status, diagnostics}
   end
 
+  @doc false
+  def target_opts(target) do
+    [
+      sql_paths: target.sql_paths,
+      namespace: target.namespace,
+      connection: target.connection,
+      default_nullable: target.default_nullable,
+      row_type: target.row_type,
+      mode: target.mode,
+      overrides: target.overrides,
+      repo: target.repo,
+      manifest: manifest_path(target.key),
+      cwd: File.cwd!()
+    ]
+  end
+
   @impl true
-  def manifests, do: [manifest_path()]
+  def manifests, do: Enum.map(Config.targets(), &manifest_path(&1.key))
 
   @impl true
   def clean do
-    path = manifest_path()
+    for target <- Config.targets() do
+      path = manifest_path(target.key)
 
-    for {_sql, %{generated: ex_path}} <- SquirrelEx.Manifest.read(path) do
-      File.rm(ex_path)
+      for {_sql, %{generated: ex_path}} <- SquirrelEx.Manifest.read(path) do
+        File.rm(ex_path)
+      end
+
+      File.rm(path)
     end
 
-    File.rm(path)
     :ok
   end
 
-  defp manifest_path, do: Path.join(Mix.Project.manifest_path(), @manifest)
+  defp merge_status(:error, _), do: :error
+  defp merge_status(_, :error), do: :error
+  defp merge_status(:ok, _), do: :ok
+  defp merge_status(_, :ok), do: :ok
+  defp merge_status(_, other), do: other
+
+  defp manifest_path(:default), do: Path.join(Mix.Project.manifest_path(), @manifest)
+
+  defp manifest_path(key),
+    do: Path.join(Mix.Project.manifest_path(), "#{@manifest}.#{key}")
 
   # Warn (once, on a real build) if the configured SQL directories are not on
   # elixirc_paths, since the generated modules would never be compiled.

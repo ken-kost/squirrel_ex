@@ -43,11 +43,13 @@ defmodule SquirrelEx.IntegrationTest do
 
     # Snapshot the salient parts of the generated source.
     assert source =~ "defmodule #{namespace}.PostsByAuthor do"
-    assert source =~ "@type row :: %{id: String.t(), title: String.t(), body: String.t() | nil}"
+    assert source =~ "@type row :: __MODULE__.Row.t()"
+    assert source =~ "body: String.t() | nil"
     assert source =~ "def run(repo, author_id) do"
 
-    # The generated module compiles...
-    [{mod, _}] = Code.compile_file(ex_path)
+    # The generated module compiles (plus its nested Row struct)...
+    mod = Module.concat(namespace, "PostsByAuthor")
+    Code.compile_file(ex_path)
 
     # ...and runs against the live database, returning correctly-shaped maps.
     Repo.query!("insert into posts (title, body, author_id) values ($1, $2, $3)", [
@@ -105,5 +107,97 @@ defmodule SquirrelEx.IntegrationTest do
     assert diagnostic.severity == :error
     assert diagnostic.compiler_name == "squirrel_ex"
     assert diagnostic.message =~ "does not exist"
+  end
+
+  test "left-joined columns are typed nullable without an annotation", ctx do
+    namespace = "SquirrelEx.Gen#{System.unique_integer([:positive])}"
+
+    write_sql(ctx.dir, "posts_with_author.sql", """
+    select p.id, p.title, a.name as author_name
+    from posts p
+    left join authors a on a.id = p.author_id
+    """)
+
+    assert {:ok, _} = run(ctx.dir, ctx.manifest, namespace)
+    source = File.read!(Path.join(ctx.dir, "posts_with_author.ex"))
+
+    # author_name comes from the inner side of a LEFT JOIN -> nullable.
+    assert source =~ "author_name: String.t() | nil"
+    # p.title is NOT NULL in the base table and not nullable here.
+    assert source =~ "title: String.t(),"
+  end
+
+  test "enum columns decode to atoms with an atom-union type", ctx do
+    namespace = "SquirrelEx.Gen#{System.unique_integer([:positive])}"
+    Repo.query!("insert into widgets (state) values ('published')")
+
+    write_sql(ctx.dir, "widget_states.sql", "select id, state from widgets order by id")
+
+    assert {:ok, _} = run(ctx.dir, ctx.manifest, namespace)
+    ex_path = Path.join(ctx.dir, "widget_states.ex")
+    source = File.read!(ex_path)
+
+    assert source =~ "state: :draft | :published | :archived"
+    assert source =~ "decode_state"
+
+    mod = Module.concat(namespace, "WidgetStates")
+    Code.compile_file(ex_path)
+    assert {:ok, [row]} = mod.run(Repo)
+    assert row.state == :published
+  end
+
+  test "array columns are typed as lists", ctx do
+    namespace = "SquirrelEx.Gen#{System.unique_integer([:positive])}"
+    Repo.query!("insert into taglists (tags) values (array['a','b'])")
+
+    write_sql(ctx.dir, "tag_lists.sql", "select id, tags from taglists order by id")
+
+    assert {:ok, _} = run(ctx.dir, ctx.manifest, namespace)
+    ex_path = Path.join(ctx.dir, "tag_lists.ex")
+    assert File.read!(ex_path) =~ "tags: [String.t()]"
+
+    mod = Module.concat(namespace, "TagLists")
+    Code.compile_file(ex_path)
+    assert {:ok, [%{tags: ["a", "b"]}]} = mod.run(Repo)
+  end
+
+  test "the @one directive returns a single row or nil", ctx do
+    namespace = "SquirrelEx.Gen#{System.unique_integer([:positive])}"
+
+    write_sql(ctx.dir, "post_by_id.sql", """
+    -- @one
+    select id, title from posts where id = $1
+    """)
+
+    assert {:ok, _} = run(ctx.dir, ctx.manifest, namespace)
+    ex_path = Path.join(ctx.dir, "post_by_id.ex")
+    assert File.read!(ex_path) =~ "{:ok, row() | nil}"
+
+    mod = Module.concat(namespace, "PostById")
+    Code.compile_file(ex_path)
+
+    %{rows: [[id]]} =
+      Repo.query!("insert into posts (title, author_id) values ('X', 1) returning id")
+
+    assert {:ok, %{title: "X"}} = mod.run(Repo, id)
+    assert {:ok, nil} = mod.run(Repo, Ecto.UUID.bingenerate())
+  end
+
+  test "refuses to clobber a generated file that lacks the squirrel_ex header", ctx do
+    namespace = "SquirrelEx.Gen#{System.unique_integer([:positive])}"
+    sql_path = write_sql(ctx.dir, "guarded.sql", "select id from posts")
+
+    assert {:ok, _} = run(ctx.dir, ctx.manifest, namespace)
+    ex_path = Path.join(ctx.dir, "guarded.ex")
+
+    # Simulate a developer hand-editing the generated file.
+    File.write!(ex_path, "defmodule Hand.Edited do\n  # mine!\nend\n")
+    File.write!(sql_path, "select id, title from posts")
+
+    assert {:error, [diagnostic]} = run(ctx.dir, ctx.manifest, namespace)
+    assert diagnostic.severity == :error
+    assert diagnostic.message =~ "refusing to overwrite"
+    # Untouched.
+    assert File.read!(ex_path) =~ "Hand.Edited"
   end
 end

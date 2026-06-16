@@ -50,4 +50,30 @@ defmodule Mix.Tasks.Compile.SquirrelExTest do
     assert [path] = Mix.Tasks.Compile.SquirrelEx.manifests()
     assert String.ends_with?(path, "compile.squirrel_ex")
   end
+
+  test "squirrel_ex.check passes when up to date and fails when stale", %{dir: dir} do
+    sql_path = Path.join(dir, "checked.sql")
+    File.write!(sql_path, "select id from posts")
+
+    assert {:ok, _} = Mix.Tasks.Compile.SquirrelEx.run([])
+
+    # Up to date now: does not raise.
+    Mix.Tasks.SquirrelEx.Check.run([])
+
+    # Change the .sql without regenerating -> stale -> raises.
+    File.write!(sql_path, "select id, title from posts")
+    assert_raise Mix.Error, fn -> Mix.Tasks.SquirrelEx.Check.run([]) end
+  end
+
+  test "squirrel_ex.gen regenerates from the .sql files", %{dir: dir} do
+    sql_path = Path.join(dir, "regen.sql")
+    File.write!(sql_path, "select id from posts")
+    ex_path = Path.join(dir, "regen.ex")
+
+    Mix.Tasks.SquirrelEx.Gen.run([])
+    assert File.read!(ex_path) =~ "defmodule SquirrelEx.TaskTest.Sql.Regen"
+
+    # A plain recompile afterwards is a no-op (gen left a fresh manifest).
+    assert {:noop, []} = Mix.Tasks.Compile.SquirrelEx.run([])
+  end
 end

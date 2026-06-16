@@ -11,18 +11,50 @@ defmodule SquirrelEx.Test.Sql.AllPosts do
   select id, title, body from posts order by title
   """
 
-  @type row :: %{id: String.t(), title: String.t(), body: String.t() | nil}
+  defmodule Row do
+    @enforce_keys [:id, :title, :body]
+    defstruct [:id, :title, :body]
+
+    @type t :: %__MODULE__{
+            id: String.t(),
+            title: String.t(),
+            body: String.t() | nil
+          }
+  end
+
+  @type row :: __MODULE__.Row.t()
+
+  @doc false
+  @spec __squirrel__() :: %{sql: String.t(), params: [map()], columns: [map()]}
+  def __squirrel__ do
+    %{
+      sql: @sql,
+      params: [],
+      columns: [
+        %{name: "id", type: "String.t()", nullable: false, enum: nil},
+        %{name: "title", type: "String.t()", nullable: false, enum: nil},
+        %{name: "body", type: "String.t() | nil", nullable: true, enum: nil}
+      ]
+    }
+  end
 
   @spec run(repo :: Ecto.Repo.t()) ::
           {:ok, [row()]} | {:error, term()}
   def run(repo) do
     case Ecto.Adapters.SQL.query(repo, @sql, []) do
-      {:ok, %{columns: cols, rows: rows}} ->
-        keys = Enum.map(cols, &String.to_atom/1)
-        {:ok, Enum.map(rows, fn row -> keys |> Enum.zip(row) |> Map.new() end)}
+      {:ok, %{rows: rows}} ->
+        {:ok, Enum.map(rows, &build_row/1)}
 
       {:error, _} = error ->
         error
     end
+  end
+
+  defp build_row([v0, v1, v2]) do
+    %Row{
+      id: v0,
+      title: v1,
+      body: v2
+    }
   end
 end

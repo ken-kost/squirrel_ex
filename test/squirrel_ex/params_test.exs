@@ -37,4 +37,24 @@ defmodule SquirrelEx.ParamsTest do
     sql = "select * from t where name = $2 and id = $1"
     assert Params.names(sql, 2) == ["id", "name"]
   end
+
+  test "does not infer names from identifiers inside string literals" do
+    sql = "select * from t where note = 'set id = something' and status = $1"
+    assert Params.names(sql, 1) == ["status"]
+  end
+
+  test "does not infer names from inside line comments" do
+    sql = "select * from t\n-- old: where id = $1\nwhere email = $1"
+    assert Params.names(sql, 1) == ["email"]
+  end
+
+  test "does not infer names from inside block comments" do
+    sql = "select * /* where id = $9 */ from t where slug = $1"
+    assert Params.names(sql, 1) == ["slug"]
+  end
+
+  test "masks quoted identifiers but keeps real references intact" do
+    sql = ~s|select * from t where "weird = col" is null and id = $1|
+    assert Params.names(sql, 1) == ["id"]
+  end
 end

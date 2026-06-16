@@ -45,6 +45,10 @@ defmodule SquirrelEx.MixProject do
       # Runtime execution of the generated queries (Ecto.Adapters.SQL.query/4)
       # and the Ecto.UUID type used in generated specs.
       {:ecto_sql, "~> 3.13"},
+      # Build-time visibility around introspection (also a transitive dep).
+      {:telemetry, "~> 1.0"},
+      # Powers `mix squirrel_ex.watch` (regenerate on .sql change).
+      {:file_system, "~> 1.0"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

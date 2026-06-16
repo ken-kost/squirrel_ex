@@ -5,8 +5,9 @@ defmodule SquirrelEx do
   Write plain `.sql` files (one query per file) under `priv/sql/`. On every
   `mix compile`, the `:squirrel_ex` compiler introspects each query against a
   live PostgreSQL database — learning its parameter types and result column
-  names + types — and generates a typed wrapper module *next to* the `.sql`
-  file (`priv/sql/list_posts.sql` → `priv/sql/list_posts.ex`).
+  names + types, and (via `EXPLAIN`) their nullability — and generates a typed
+  wrapper module *next to* the `.sql` file (`priv/sql/list_posts.sql` →
+  `priv/sql/list_posts.ex`).
 
   The generated module is committed to source control, readable by your IDE,
   and carries a `DO NOT EDIT` header. It exposes a typed `run/N`:
@@ -18,7 +19,7 @@ defmodule SquirrelEx do
   through `mix compile`.
   """
 
-  alias SquirrelEx.{Codegen, Diagnostic, Introspector, Manifest, Oid, Params, Query}
+  alias SquirrelEx.{Codegen, Diagnostic, Introspector, Manifest, Nullability, Oid, Params, Query}
 
   @typedoc "Result of a compilation run, mirroring `Mix.Task.Compiler.run/1`."
   @type result :: {:ok | :noop | :error, [Mix.Task.Compiler.Diagnostic.t()]}
@@ -34,6 +35,10 @@ defmodule SquirrelEx do
     * `:manifest` — path to the incremental-build manifest (required)
     * `:cwd` — base directory for display paths (default `File.cwd!/0`)
     * `:default_nullable` — unannotated columns nullable? (default `false`)
+    * `:row_type` — `:struct` (default) or `:map`
+    * `:mode` — `:full` (default) or `:metadata` (types + `__squirrel__/0` only)
+    * `:overrides` — type override map (default `%{}`)
+    * `:repo` — bake this repo into `run/N` (default `nil`)
   """
   @spec run(keyword()) :: result()
   def run(opts) do
@@ -67,15 +72,22 @@ defmodule SquirrelEx do
   end
 
   defp compile_stale(stale, manifest, manifest_path, opts, cwd) do
-    namespace = Keyword.fetch!(opts, :namespace)
-    default_nullable = Keyword.get(opts, :default_nullable, false)
+    gen_opts = %{
+      namespace: Keyword.fetch!(opts, :namespace),
+      default_nullable: Keyword.get(opts, :default_nullable, false),
+      row_type: Keyword.get(opts, :row_type, :struct),
+      overrides: Keyword.get(opts, :overrides, %{}),
+      repo: Keyword.get(opts, :repo),
+      mode: Keyword.get(opts, :mode, :full),
+      cwd: cwd
+    }
 
     case Introspector.connect(Keyword.fetch!(opts, :connection)) do
       {:ok, conn} ->
         results =
           try do
             Enum.map(stale, fn sql_path ->
-              {sql_path, generate(conn, sql_path, namespace, default_nullable, cwd)}
+              {sql_path, generate(conn, sql_path, gen_opts)}
             end)
           after
             Introspector.disconnect(conn)
@@ -89,41 +101,74 @@ defmodule SquirrelEx do
   end
 
   # Generates one file. Returns `{:ok, entry, warnings}` or `{:error, diagnostic}`.
-  defp generate(conn, sql_path, namespace, default_nullable, cwd) do
+  defp generate(conn, sql_path, gen_opts) do
+    :telemetry.span([:squirrel_ex, :generate], %{sql_path: sql_path}, fn ->
+      {do_generate(conn, sql_path, gen_opts), %{sql_path: sql_path}}
+    end)
+  end
+
+  defp do_generate(conn, sql_path, gen_opts) do
     raw = File.read!(sql_path)
-    {clean, annotations, doc} = Query.parse_source(raw)
+    {clean, annotations, doc, directives} = Query.parse_source(raw)
 
     case Introspector.introspect(conn, clean) do
       {:ok, %{params: param_oids, columns: columns}} ->
-        {:ok, param_specs, w1} = Oid.resolve(param_oids, conn)
+        {:ok, param_types, w1} = Oid.resolve(param_oids, conn, overrides: gen_opts.overrides)
         {col_names, col_oids} = Enum.unzip(columns)
-        {:ok, col_specs, w2} = Oid.resolve(col_oids, conn)
+        {:ok, col_types, w2} = Oid.resolve(col_oids, conn, overrides: gen_opts.overrides)
+        verdicts = Nullability.verdicts(conn, clean, col_names)
 
         query =
           Query.build(
-            namespace: namespace,
+            namespace: gen_opts.namespace,
             sql_path: sql_path,
-            rel_path: Path.relative_to(sql_path, cwd),
+            rel_path: Path.relative_to(sql_path, gen_opts.cwd),
             clean_sql: clean,
             doc: doc,
             annotations: annotations,
+            directives: directives,
             param_names: Params.names(clean, length(param_oids)),
-            param_typespecs: Enum.map(param_specs, fn {_ecto, spec} -> spec end),
-            columns: Enum.zip(col_names, Enum.map(col_specs, fn {_ecto, spec} -> spec end)),
-            default_nullable: default_nullable
+            param_types: param_types,
+            columns: Enum.zip(col_names, col_types),
+            nullability: verdicts,
+            default_nullable: gen_opts.default_nullable,
+            row_type: gen_opts.row_type,
+            repo: gen_opts.repo,
+            mode: gen_opts.mode
           )
 
-        source = Codegen.generate(query)
-        File.write!(query.ex_path, source)
-
-        warnings = Enum.map(w1 ++ w2, &Diagnostic.warning(sql_path, &1))
-        {:ok, %{hash: Manifest.hash(raw), generated: query.ex_path}, warnings}
+        write_generated(query, sql_path, raw, w1 ++ w2)
 
       {:error, %Postgrex.Error{} = error} ->
         {:error, Diagnostic.from_postgrex(sql_path, clean, error)}
 
       {:error, other} ->
         {:error, Diagnostic.error(sql_path, "introspection failed: #{inspect(other)}")}
+    end
+  end
+
+  # Writes the generated module, refusing to clobber a file that lacks our header
+  # (i.e. one a developer has hand-edited or hand-written).
+  defp write_generated(query, sql_path, raw, warnings) do
+    if clobber?(query.ex_path) do
+      {:error,
+       Diagnostic.error(
+         query.ex_path,
+         "refusing to overwrite #{Path.relative_to_cwd(query.ex_path)}: it is missing the " <>
+           "squirrel_ex header, so it looks hand-edited. Delete it to regenerate from #{Path.basename(sql_path)}."
+       )}
+    else
+      source = Codegen.generate(query)
+      File.write!(query.ex_path, source)
+      warnings = Enum.map(warnings, &Diagnostic.warning(sql_path, &1))
+      {:ok, %{hash: Manifest.hash(raw), generated: query.ex_path}, warnings}
+    end
+  end
+
+  defp clobber?(ex_path) do
+    case File.read(ex_path) do
+      {:ok, existing} -> not String.starts_with?(existing, Codegen.header())
+      _ -> false
     end
   end
 
