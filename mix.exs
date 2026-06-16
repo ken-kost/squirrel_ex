@@ -8,7 +8,7 @@ defmodule SquirrelEx.MixProject do
     [
       app: :squirrel_ex,
       version: @version,
-      elixir: "~> 1.20-rc",
+      elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
       elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
@@ -21,30 +21,21 @@ defmodule SquirrelEx.MixProject do
     ]
   end
 
-  # NOTE: we intentionally do NOT register the `:squirrel_ex` compiler here.
-  # This project *defines* the compiler, so on a clean build the compiler task
-  # module does not exist yet (chicken-and-egg). Host applications add it via
-  # `compilers: [:squirrel_ex] ++ Mix.compilers()`. Our tests drive the compiler
-  # directly. See README for host setup.
-
   def application do
     [
       extra_applications: [:logger]
     ]
   end
 
-  # Compile test fixtures (committed generated modules) and support helpers
-  # only in the test environment.
   defp elixirc_paths(:test), do: ["lib", "test/support", "test/fixtures/sql"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
     [
-      # Compile-time introspection of PostgreSQL.
       {:postgrex, "~> 0.20"},
-      # Runtime execution of the generated queries (Ecto.Adapters.SQL.query/4)
-      # and the Ecto.UUID type used in generated specs.
       {:ecto_sql, "~> 3.13"},
+      {:telemetry, "~> 1.0"},
+      {:file_system, "~> 1.0"},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
   end

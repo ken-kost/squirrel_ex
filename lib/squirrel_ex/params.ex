@@ -22,10 +22,14 @@ defmodule SquirrelEx.Params do
   @doc """
   Returns an ordered list of parameter names for `count` placeholders found in
   `sql`. Index 0 corresponds to `$1`.
+
+  String literals, quoted identifiers, and `--` / `/* */` comments are masked
+  out before inference, so identifiers inside them are never mistaken for column
+  references.
   """
   @spec names(String.t(), non_neg_integer()) :: [String.t()]
   def names(sql, count) do
-    inferred = scan(sql)
+    inferred = sql |> mask() |> scan()
 
     {names, _used} =
       Enum.map_reduce(1..count//1, %{}, fn n, used ->
@@ -36,6 +40,49 @@ defmodule SquirrelEx.Params do
 
     names
   end
+
+  @doc false
+  # Replaces the contents of string literals, quoted identifiers, and comments
+  # with spaces (preserving length and `$n` positions outside them), so the
+  # inference regexes only see real SQL tokens.
+  @spec mask(String.t()) :: String.t()
+  def mask(sql), do: mask(sql, :normal, [])
+
+  defp mask(<<>>, _state, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  # Enter states.
+  defp mask(<<"--", rest::binary>>, :normal, acc), do: mask(rest, :line_comment, ["  " | acc])
+  defp mask(<<"/*", rest::binary>>, :normal, acc), do: mask(rest, :block_comment, ["  " | acc])
+  defp mask(<<"'", rest::binary>>, :normal, acc), do: mask(rest, :string, [" " | acc])
+  defp mask(<<"\"", rest::binary>>, :normal, acc), do: mask(rest, :quoted, [" " | acc])
+  defp mask(<<c::utf8, rest::binary>>, :normal, acc), do: mask(rest, :normal, [<<c::utf8>> | acc])
+
+  # Line comment: until newline.
+  defp mask(<<"\n", rest::binary>>, :line_comment, acc), do: mask(rest, :normal, ["\n" | acc])
+
+  defp mask(<<_::utf8, rest::binary>>, :line_comment, acc),
+    do: mask(rest, :line_comment, [" " | acc])
+
+  # Block comment: until */.
+  defp mask(<<"*/", rest::binary>>, :block_comment, acc), do: mask(rest, :normal, ["  " | acc])
+
+  defp mask(<<"\n", rest::binary>>, :block_comment, acc),
+    do: mask(rest, :block_comment, ["\n" | acc])
+
+  defp mask(<<_::utf8, rest::binary>>, :block_comment, acc),
+    do: mask(rest, :block_comment, [" " | acc])
+
+  # Single-quoted string (doubled '' escapes a quote).
+  defp mask(<<"''", rest::binary>>, :string, acc), do: mask(rest, :string, ["  " | acc])
+  defp mask(<<"'", rest::binary>>, :string, acc), do: mask(rest, :normal, [" " | acc])
+  defp mask(<<"\n", rest::binary>>, :string, acc), do: mask(rest, :string, ["\n" | acc])
+  defp mask(<<_::utf8, rest::binary>>, :string, acc), do: mask(rest, :string, [" " | acc])
+
+  # Double-quoted identifier ("" escapes a quote).
+  defp mask(<<"\"\"", rest::binary>>, :quoted, acc), do: mask(rest, :quoted, ["  " | acc])
+  defp mask(<<"\"", rest::binary>>, :quoted, acc), do: mask(rest, :normal, [" " | acc])
+  defp mask(<<"\n", rest::binary>>, :quoted, acc), do: mask(rest, :quoted, ["\n" | acc])
+  defp mask(<<_::utf8, rest::binary>>, :quoted, acc), do: mask(rest, :quoted, [" " | acc])
 
   # Returns a map of placeholder-number => inferred-name (first match wins).
   defp scan(sql) do

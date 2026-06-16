@@ -6,18 +6,43 @@ defmodule SquirrelEx.Query do
   Responsibilities:
 
     * derive the output module name from the file name and namespace
-    * extract leading `-- ` comments into a module doc
+    * extract leading `-- ` comments into a module doc, and recognise leading
+      directives such as `-- @one`
     * parse and strip `!` / `?` nullability annotations from result columns
-    * assemble parameters (name + typespec) and columns (key + typespec)
+    * assemble parameters (name + typespec) and columns (key + typespec +
+      decoder + nullability), resolving the final nullability of each column
+      from, in order: the explicit annotation, the `EXPLAIN`-derived verdict,
+      then the `:default_nullable` setting.
   """
 
-  alias SquirrelEx.Query
+  alias SquirrelEx.{Query, Type}
 
   @enforce_keys [:module, :sql_path, :ex_path, :rel_path, :sql, :params, :columns]
-  defstruct [:module, :sql_path, :ex_path, :rel_path, :sql, :doc, :params, :columns]
+  defstruct [
+    :module,
+    :sql_path,
+    :ex_path,
+    :rel_path,
+    :sql,
+    :doc,
+    :params,
+    :columns,
+    row_type: :struct,
+    one: false,
+    repo: nil,
+    mode: :full
+  ]
 
-  @type column :: %{key: String.t(), typespec: String.t()}
-  @type param :: %{name: String.t(), typespec: String.t()}
+  @type column :: %{
+          key: String.t(),
+          typespec: String.t(),
+          nullable: boolean(),
+          decoder: Type.decoder(),
+          enum: [String.t()] | nil,
+          ecto: term()
+        }
+  @type param :: %{name: String.t(), typespec: String.t(), ecto: term()}
+  @type directives :: %{optional(:one) => boolean()}
 
   @type t :: %__MODULE__{
           module: String.t(),
@@ -27,26 +52,55 @@ defmodule SquirrelEx.Query do
           sql: String.t(),
           doc: String.t() | nil,
           params: [param()],
-          columns: [column()]
+          columns: [column()],
+          row_type: :map | :struct,
+          one: boolean(),
+          repo: module() | nil,
+          mode: :full | :metadata
         }
 
   @annotation ~r/([a-zA-Z_][a-zA-Z0-9_]*)([!?])(?=\s|,|\)|$)/
 
   @doc """
-  Parses the raw SQL source into `{clean_sql, annotations, doc}`.
+  Parses the raw SQL source into `{clean_sql, annotations, doc, directives}`.
 
     * `clean_sql` — the SQL with `!`/`?` column annotations removed, safe to send
       to PostgreSQL and embed verbatim in the generated module.
     * `annotations` — a map of `downcased_column_name => :nullable | :not_null`.
-    * `doc` — the leading `-- ` comment block (trimmed), or `nil`.
+    * `doc` — the leading `-- ` comment block (trimmed, directives removed), or `nil`.
+    * `directives` — recognised leading directives, e.g. `%{one: true}` for
+      `-- @one` / `-- :one`.
   """
   @spec parse_source(String.t()) ::
-          {String.t(), %{optional(String.t()) => :nullable | :not_null}, String.t() | nil}
+          {String.t(), %{optional(String.t()) => :nullable | :not_null}, String.t() | nil,
+           directives()}
   def parse_source(raw) do
-    doc = extract_doc(raw)
+    comments = leading_comments(raw)
+    directives = parse_directives(comments)
+    doc = doc_from_comments(comments)
     annotations = extract_annotations(raw)
     clean = Regex.replace(@annotation, raw, "\\1")
-    {clean, annotations, doc}
+    {clean, annotations, doc, directives}
+  end
+
+  @doc """
+  Returns the machine-readable metadata for `query`: `%{sql, params, columns}`.
+
+  This is the single source of truth for the shape exposed both by the generated
+  `__squirrel__/0` accessor and by `SquirrelEx.Introspection.metadata/3`. The
+  `:type` fields are Elixir typespec strings; `:ecto` is the closest Ecto type
+  (precise where the typespec is lossy, e.g. `uuid` → `Ecto.UUID`).
+  """
+  @spec metadata(t()) :: %{sql: String.t(), params: [map()], columns: [map()]}
+  def metadata(%Query{} = query) do
+    %{
+      sql: query.sql,
+      params: Enum.map(query.params, fn p -> %{name: p.name, type: p.typespec, ecto: p.ecto} end),
+      columns:
+        Enum.map(query.columns, fn c ->
+          %{name: c.key, type: c.typespec, ecto: c.ecto, nullable: c.nullable, enum: c.enum}
+        end)
+    }
   end
 
   @doc """
@@ -70,10 +124,19 @@ defmodule SquirrelEx.Query do
     * `:clean_sql` — annotation-stripped SQL (required)
     * `:doc` — module doc string or `nil`
     * `:annotations` — `%{column => :nullable | :not_null}`
+    * `:directives` — `%{one: boolean}` parsed from leading directives
     * `:param_names` — list of parameter names, in order
-    * `:param_typespecs` — list of parameter typespecs, in order
-    * `:columns` — list of `{name, base_typespec}` from introspection, in order
+    * `:param_types` — list of `SquirrelEx.Type` for the parameters, in order.
+      (`:param_typespecs`, a list of plain typespec strings, is still accepted.)
+    * `:columns` — list of `{name, SquirrelEx.Type | typespec_string}` from
+      introspection, in order
+    * `:nullability` — list of `:nullable | :not_null | :unknown` verdicts, one
+      per column, in order (default all `:unknown`)
     * `:default_nullable` — whether unannotated columns are nullable (default `false`)
+    * `:row_type` — `:struct` (default) or `:map`
+    * `:repo` — when set, bakes the repo into `run/N` (callers omit it)
+    * `:mode` — `:full` (default, emit `run/N`) or `:metadata` (types + the
+      `__squirrel__/0` accessor only, no runtime `run/N`)
   """
   @spec build(keyword()) :: t()
   def build(opts) do
@@ -82,16 +145,11 @@ defmodule SquirrelEx.Query do
     rel_path = Keyword.fetch!(opts, :rel_path)
     clean_sql = Keyword.fetch!(opts, :clean_sql)
     annotations = Keyword.get(opts, :annotations, %{})
+    directives = Keyword.get(opts, :directives, %{})
     default_nullable = Keyword.get(opts, :default_nullable, false)
 
-    params =
-      Enum.zip(Keyword.fetch!(opts, :param_names), Keyword.fetch!(opts, :param_typespecs))
-      |> Enum.map(fn {name, spec} -> %{name: name, typespec: spec} end)
-
-    columns =
-      Enum.map(Keyword.fetch!(opts, :columns), fn {name, base} ->
-        %{key: name, typespec: apply_nullability(base, name, annotations, default_nullable)}
-      end)
+    params = build_params(opts)
+    columns = build_columns(opts, annotations, default_nullable)
 
     %Query{
       module: module_name(namespace, sql_path),
@@ -101,36 +159,103 @@ defmodule SquirrelEx.Query do
       sql: String.trim(clean_sql),
       doc: Keyword.get(opts, :doc),
       params: params,
-      columns: columns
+      columns: columns,
+      row_type: Keyword.get(opts, :row_type, :struct),
+      one: Map.get(directives, :one, false),
+      repo: Keyword.get(opts, :repo),
+      mode: Keyword.get(opts, :mode, :full)
     }
   end
 
-  defp apply_nullability(base, name, annotations, default_nullable) do
-    nullable? =
-      case Map.get(annotations, String.downcase(name)) do
-        :nullable -> true
-        :not_null -> false
-        nil -> default_nullable
+  defp build_params(opts) do
+    names = Keyword.fetch!(opts, :param_names)
+
+    specs =
+      case Keyword.fetch(opts, :param_types) do
+        {:ok, types} -> Enum.map(types, &{Type.input_typespec(&1), &1.ecto})
+        :error -> Enum.map(Keyword.fetch!(opts, :param_typespecs), &{&1, nil})
       end
 
-    if nullable?, do: base <> " | nil", else: base
+    Enum.zip_with(names, specs, fn name, {spec, ecto} ->
+      %{name: name, typespec: spec, ecto: ecto}
+    end)
   end
 
-  defp extract_doc(raw) do
-    lines =
-      raw
-      |> String.split("\n")
-      |> Enum.take_while(&String.starts_with?(String.trim_leading(&1), "--"))
-      |> Enum.map(fn line ->
-        line
-        |> String.trim_leading()
-        |> String.replace_prefix("--", "")
-        |> String.trim()
-      end)
+  defp build_columns(opts, annotations, default_nullable) do
+    columns = Keyword.fetch!(opts, :columns)
+    verdicts = Keyword.get(opts, :nullability, []) |> pad(length(columns))
 
-    case lines do
+    [columns, verdicts]
+    |> Enum.zip()
+    |> Enum.map(fn {{name, type}, verdict} ->
+      {base, decoder, enum, ecto} = base_and_decoder(type)
+      nullable? = nullable?(name, annotations, verdict, default_nullable)
+
+      %{
+        key: name,
+        typespec: if(nullable?, do: base <> " | nil", else: base),
+        nullable: nullable?,
+        decoder: decoder,
+        enum: enum,
+        ecto: ecto
+      }
+    end)
+  end
+
+  defp base_and_decoder(%Type{typespec: spec, decoder: decoder, enum: enum, ecto: ecto}),
+    do: {spec, decoder, enum, ecto}
+
+  defp base_and_decoder(spec) when is_binary(spec), do: {spec, :identity, nil, nil}
+
+  # Resolution order: explicit annotation > EXPLAIN verdict > default.
+  defp nullable?(name, annotations, verdict, default_nullable) do
+    case Map.get(annotations, String.downcase(name)) do
+      :nullable ->
+        true
+
+      :not_null ->
+        false
+
+      nil ->
+        case verdict do
+          :nullable -> true
+          :not_null -> false
+          _ -> default_nullable
+        end
+    end
+  end
+
+  defp pad(list, n) when length(list) >= n, do: Enum.take(list, n)
+  defp pad(list, n), do: list ++ List.duplicate(:unknown, n - length(list))
+
+  # Leading run of comment lines (the doc/directive block at the top of the file).
+  defp leading_comments(raw) do
+    raw
+    |> String.split("\n")
+    |> Enum.take_while(&String.starts_with?(String.trim_leading(&1), "--"))
+    |> Enum.map(fn line ->
+      line
+      |> String.trim_leading()
+      |> String.replace_prefix("--", "")
+      |> String.trim()
+    end)
+  end
+
+  @directive ~r/\A[@:]([a-z_]+)\b/i
+
+  defp parse_directives(comments) do
+    Enum.reduce(comments, %{}, fn comment, acc ->
+      case Regex.run(@directive, comment, capture: :all_but_first) do
+        ["one"] -> Map.put(acc, :one, true)
+        _ -> acc
+      end
+    end)
+  end
+
+  defp doc_from_comments(comments) do
+    case Enum.reject(comments, &Regex.match?(@directive, &1)) do
       [] -> nil
-      _ -> lines |> Enum.join("\n") |> String.trim()
+      lines -> lines |> Enum.join("\n") |> String.trim()
     end
   end
 

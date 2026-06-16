@@ -23,8 +23,18 @@ defmodule SquirrelEx.GeneratedModuleTest do
     ])
 
     assert {:ok, rows} = SquirrelEx.Test.Sql.AllPosts.run(Repo)
-    assert [%{title: "Alpha", body: nil} = first, %{title: "Bravo", body: "b"}] = rows
-    assert Map.keys(first) |> Enum.sort() == [:body, :id, :title]
+
+    assert [
+             %SquirrelEx.Test.Sql.AllPosts.Row{title: "Alpha", body: nil} = first,
+             %{title: "Bravo", body: "b"}
+           ] = rows
+
+    assert Map.keys(first) |> Enum.reject(&(&1 == :__struct__)) |> Enum.sort() == [
+             :body,
+             :id,
+             :title
+           ]
+
     assert is_binary(first.id)
   end
 end

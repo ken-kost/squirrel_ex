@@ -19,7 +19,9 @@ IDE-readable `.ex` wrapper with a precise `@spec` next to each query.
    **parameter types** and **result column names + types** — without executing
    it.
 4. It maps the PostgreSQL type OIDs to Ecto types and Elixir typespecs
-   (`int4 → integer()`, `text → String.t()`, `uuid → String.t()`, …).
+   (`int4 → integer()`, `text → String.t()`, `uuid → Ecto.UUID.raw()`, enums to atom
+   unions, arrays to lists, …) and runs `EXPLAIN (generic_plan)` to learn each
+   result column's **nullability** (so `LEFT JOIN` columns are typed `| nil`).
 5. It generates a typed wrapper module **next to** the `.sql` file
    (`priv/sql/list_posts.sql → priv/sql/list_posts.ex`). The generated file
    carries a `DO NOT EDIT` header and is meant to be committed to source
@@ -53,19 +55,29 @@ defmodule MyApp.Sql.ListPosts do
   select id, title, body from posts where author_id = $1 order by title
   """
 
-  @type row :: %{id: String.t(), title: String.t(), body: String.t() | nil}
+  defmodule Row do
+    @enforce_keys [:id, :title, :body]
+    defstruct [:id, :title, :body]
+
+    @type t :: %__MODULE__{id: String.t(), title: String.t(), body: String.t() | nil}
+  end
+
+  @type row :: __MODULE__.Row.t()
 
   @spec run(repo :: Ecto.Repo.t(), author_id :: integer()) ::
           {:ok, [row()]} | {:error, term()}
   def run(repo, author_id) do
     case Ecto.Adapters.SQL.query(repo, @sql, [author_id]) do
-      {:ok, %{columns: cols, rows: rows}} ->
-        keys = Enum.map(cols, &String.to_atom/1)
-        {:ok, Enum.map(rows, fn row -> keys |> Enum.zip(row) |> Map.new() end)}
+      {:ok, %{rows: rows}} ->
+        {:ok, Enum.map(rows, &build_row/1)}
 
       {:error, _} = error ->
         error
     end
+  end
+
+  defp build_row([v0, v1, v2]) do
+    %Row{id: v0, title: v1, body: v2}
   end
 end
 ```
@@ -74,8 +86,10 @@ Call it with your repo:
 
 ```elixir
 {:ok, posts} = MyApp.Sql.ListPosts.run(MyApp.Repo, author_id)
-# => [%{id: "…", title: "Hello", body: nil}, …]
+# => [%MyApp.Sql.ListPosts.Row{id: "…", title: "Hello", body: nil}, …]
 ```
+
+Prefer plain maps? Set `config :squirrel_ex, row_type: :map`.
 
 ## Installation
 
@@ -134,28 +148,106 @@ All keys live under `config :squirrel_ex`:
 | `:repo` | `<CamelizedOtpApp>.Repo` | The `Ecto.Repo` the generated `run/N` calls at runtime. |
 | `:namespace` | `<CamelizedOtpApp>.Sql` | Output module namespace. |
 | `:sql_paths` | `["priv/sql/**/*.sql"]` | Globs to search for `.sql` files. |
-| `:default_nullable` | `false` | Whether unannotated result columns are nullable. |
+| `:default_nullable` | `false` | Whether unannotated, unprovable result columns are nullable. |
+| `:row_type` | `:struct` | `:struct` generates a `<Query>.Row` struct; `:map` returns plain maps. |
+| `:mode` | `:full` | `:full` emits a runtime `run/N`; `:metadata` emits only the types + `__squirrel__/0`. |
+| `:bake_repo` | `false` | Bake `:repo` into `run/N` so callers don't pass it. |
+| `:type_overrides` | `%{}` | Map of OID or PostgreSQL type name → typespec string (or `{ecto, typespec}`), consulted first. |
+| `:timestamp_type` | — | `:naive_datetime` maps `timestamptz` to `NaiveDateTime.t()`. |
+| `:repos` | — | Keyed list of per-target configs for multi-database projects. |
 
 If neither `:connection` nor a usable repo config is found, squirrel_ex falls
 back to `DATABASE_URL`, or the standard `PGHOST` / `PGPORT` / `PGUSER` /
 `PGPASSWORD` / `PGDATABASE` environment variables.
 
-## Nullability annotations
+## Nullability
 
-The database describe step does not report column nullability, so by default
-every result column is typed as non-`nil`. You override per column with a suffix
-on the **output column name** (the suffix is stripped from the SQL that is
-actually run):
+squirrel_ex runs `EXPLAIN (format json, verbose, generic_plan)` (PostgreSQL 16+)
+on each query to determine result-column nullability automatically:
 
-- `body?` → the column is nullable (`String.t() | nil`)
+- a column from the inner side of a `LEFT JOIN` (or outer side of a `RIGHT JOIN`,
+  or either side of a `FULL JOIN`) becomes nullable;
+- a base column's `NOT NULL` constraint marks it non-nullable;
+- computed expressions we can't prove fall back to the configured default.
+
+You can always override per column with a suffix on the **output column name**
+(stripped from the SQL that is actually run):
+
+- `body?` → force the column nullable (`String.t() | nil`)
 - `email!` → force the column non-nullable
 
 ```sql
-select id, title, body? from posts
+select p.id, p.title, a.name as author_name   -- author_name auto-nullable (LEFT JOIN)
+from posts p left join authors a on a.id = p.author_id
 ```
 
-Set `config :squirrel_ex, default_nullable: true` to flip the default so columns
-are nullable unless annotated with `!`.
+Resolution order (most → least authoritative): explicit `!`/`?` → `EXPLAIN`
+join/`NOT NULL` verdict → `:default_nullable`. Set
+`config :squirrel_ex, default_nullable: true` to make unprovable columns nullable.
+
+## Enums & arrays
+
+User-defined enums expand to an atom-union typespec, and values are decoded to
+atoms (via explicit, compile-time-interned clauses — no `String.to_existing_atom`
+surprises):
+
+```sql
+select id, status from posts   -- status: :draft | :published | :archived
+```
+
+Array columns are typed as one-dimensional lists (`text[] → [String.t()]`).
+
+## Single-row queries
+
+A leading `-- @one` (or `-- :one`) directive switches `run/N` to return a single
+row or `nil` instead of a list:
+
+```sql
+-- @one
+select id, title from posts where id = $1
+```
+
+```elixir
+{:ok, %MyApp.Sql.PostById.Row{} = post} = MyApp.Sql.PostById.run(repo, id)
+{:ok, nil} = MyApp.Sql.PostById.run(repo, missing_id)
+```
+
+## Type overrides
+
+Pin specific types from config (consulted before the builtin table), keyed by
+PostgreSQL type name or OID:
+
+```elixir
+config :squirrel_ex,
+  type_overrides: %{"numeric" => "float()", "jsonb" => "MyApp.Json.t()"}
+```
+
+## Multiple databases
+
+For projects spanning more than one database, use a keyed `:repos` config; the
+compiler runs once per entry with its own connection, namespace, and options:
+
+```elixir
+config :squirrel_ex,
+  repos: [
+    primary: [otp_app: :my_app, repo: MyApp.Repo, namespace: "MyApp.Sql", sql_paths: ["priv/sql/**/*.sql"]],
+    analytics: [otp_app: :my_app, repo: MyApp.Analytics, namespace: "MyApp.Analytics.Sql", sql_paths: ["priv/analytics/**/*.sql"]]
+  ]
+```
+
+## Mix tasks
+
+- `mix squirrel_ex.gen` — regenerate all wrappers on demand (re-introspects every
+  query, even when the `.sql` text is unchanged — useful after a schema change).
+- `mix squirrel_ex.check` — CI/pre-commit gate that fails if any generated file is
+  stale vs its `.sql`, **without touching the database** (compares content hashes).
+- `mix squirrel_ex.watch` — generate once, then keep regenerating as you edit
+  `.sql` files (handy during development).
+
+## Telemetry
+
+A `[:squirrel_ex, :generate, :start | :stop | :exception]` span is emitted per
+file during compilation, with `%{sql_path: path}` metadata.
 
 ## Parameter names
 
@@ -173,25 +265,28 @@ placeholder (e.g. `where author_id = $1` → `author_id`). Recognised shapes:
 | `float4` / `float8` | `:float` | `float()` |
 | `numeric` | `:decimal` | `Decimal.t()` |
 | `text` / `varchar` / `bpchar` / `char` / `name` | `:string` | `String.t()` |
-| `uuid` | `Ecto.UUID` | `String.t()` |
+| `uuid` | `Ecto.UUID` | `Ecto.UUID.raw()` (the raw 16-byte binary Postgrex returns) |
 | `bytea` | `:binary` | `binary()` |
 | `json` / `jsonb` | `:map` | `map()` |
 | `date` | `:date` | `Date.t()` |
 | `time` | `:time` | `Time.t()` |
 | `timestamp` | `:naive_datetime` | `NaiveDateTime.t()` |
 | `timestamptz` | `:utc_datetime` | `DateTime.t()` |
+| user-defined enum | `Ecto.Enum` | `:a \| :b \| :c` (atom union) |
+| `T[]` (array) | `{:array, _}` | `[T]` |
 
-Unknown OIDs are resolved at compile time with a `pg_type` lookup: enums map to
-`String.t()`; anything else falls back to a permissive `term()` with a warning.
+Unknown OIDs are resolved at compile time with a `pg_type` lookup; anything we
+can't map falls back to a permissive `term()` with a warning.
 
-## Limitations (v1)
+## Limitations
 
-- **Nullability** is annotation-driven (`?` / `!`) with a configurable default;
-  there is no join-plan (`EXPLAIN`) analysis yet, so columns from `LEFT JOIN`s
-  are not automatically detected as nullable.
-- Result rows are returned as plain maps with atom keys (no per-query struct).
+- Requires **PostgreSQL 16+** (the `EXPLAIN generic_plan` option powers
+  nullability inference; introspection uses the Postgres wire protocol).
+- Nullability for computed expressions (functions, `coalesce`, casts) can't be
+  proven from the plan and falls back to the `:default_nullable` setting — annotate
+  with `!`/`?` to be explicit.
+- Arrays are typed one-dimensional (the describe step doesn't report dimensionality).
 - One query per `.sql` file.
-- Requires PostgreSQL (introspection uses the Postgres wire protocol).
 
 ## Development
 
