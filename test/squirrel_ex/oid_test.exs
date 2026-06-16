@@ -8,7 +8,7 @@ defmodule SquirrelEx.OidTest do
       assert {:ok, {:boolean, "boolean()"}} = Oid.fetch(16)
       assert {:ok, {:integer, "integer()"}} = Oid.fetch(23)
       assert {:ok, {:string, "String.t()"}} = Oid.fetch(25)
-      assert {:ok, {Ecto.UUID, "String.t()"}} = Oid.fetch(2950)
+      assert {:ok, {Ecto.UUID, "Ecto.UUID.raw()"}} = Oid.fetch(2950)
       assert {:ok, {:decimal, "Decimal.t()"}} = Oid.fetch(1700)
       assert {:ok, {:utc_datetime, "DateTime.t()"}} = Oid.fetch(1184)
       assert {:ok, {:map, "map()"}} = Oid.fetch(3802)

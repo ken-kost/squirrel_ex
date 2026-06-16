@@ -161,8 +161,8 @@ defmodule SquirrelEx.CodegenTest do
         clean_sql: "select id, status from posts where author_id = $1",
         param_names: ["author_id"],
         param_types: [Type.simple("integer()", :integer)],
-        # `id` is a uuid: the typespec is lossy (String.t()) but ecto carries Ecto.UUID.
-        columns: [{"id", Type.simple("String.t()", Ecto.UUID)}, {"status", enum}],
+        # `id` is a uuid: typed as the raw 16-byte binary that Postgrex returns.
+        columns: [{"id", Type.simple("Ecto.UUID.raw()", Ecto.UUID)}, {"status", enum}],
         nullability: [:not_null, :nullable]
       )
       |> Codegen.generate()
@@ -175,8 +175,10 @@ defmodule SquirrelEx.CodegenTest do
     meta = mod.__squirrel__()
     assert meta.params == [%{name: "author_id", type: "integer()", ecto: :integer}]
 
-    # The uuid column keeps its Ecto type even though the typespec is String.t().
-    assert %{name: "id", type: "String.t()", ecto: Ecto.UUID, nullable: false} = hd(meta.columns)
+    # The uuid column is typed Ecto.UUID.raw() and carries ecto: Ecto.UUID.
+    assert %{name: "id", type: "Ecto.UUID.raw()", ecto: Ecto.UUID, nullable: false} =
+             hd(meta.columns)
+
     assert Enum.at(meta.columns, 1).ecto == Ecto.Enum
   end
 

@@ -209,7 +209,7 @@ defmodule SquirrelEx.IntegrationTest do
     # The param and column are uuid/int: typespecs are lossy but ecto is precise.
     assert [%{name: "id", ecto: Ecto.UUID}] = meta.params
     id_col = Enum.find(meta.columns, &(&1.name == "id"))
-    assert id_col.type == "String.t()"
+    assert id_col.type == "Ecto.UUID.raw()"
     assert id_col.ecto == Ecto.UUID
     assert Enum.find(meta.columns, &(&1.name == "author_id")).ecto == :integer
   end

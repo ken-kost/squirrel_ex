@@ -16,7 +16,7 @@ defmodule MyApp.Sql.ListPosts do
     defstruct [:id, :title, :body]
 
     @type t :: %__MODULE__{
-            id: String.t(),
+            id: Ecto.UUID.raw(),
             title: String.t(),
             body: String.t() | nil
           }
@@ -31,7 +31,7 @@ defmodule MyApp.Sql.ListPosts do
       sql: @sql,
       params: [%{name: "author_id", type: "integer()", ecto: :integer}],
       columns: [
-        %{name: "id", type: "String.t()", ecto: Ecto.UUID, nullable: false, enum: nil},
+        %{name: "id", type: "Ecto.UUID.raw()", ecto: Ecto.UUID, nullable: false, enum: nil},
         %{name: "title", type: "String.t()", ecto: :string, nullable: false, enum: nil},
         %{name: "body", type: "String.t() | nil", ecto: :string, nullable: true, enum: nil}
       ]

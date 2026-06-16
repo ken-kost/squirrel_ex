@@ -46,7 +46,10 @@ defmodule SquirrelEx.Oid do
     {1114, "timestamp", :naive_datetime, "NaiveDateTime.t()"},
     {1184, "timestamptz", :utc_datetime, "DateTime.t()"},
     {1700, "numeric", :decimal, "Decimal.t()"},
-    {2950, "uuid", Ecto.UUID, "String.t()"},
+    # Postgrex returns/expects the raw 16-byte binary for uuid (not the hyphenated
+    # string), so the precise typespec is Ecto.UUID.raw() (<<_::128>>), not
+    # String.t() or Ecto.UUID.t() (the latter is the 36-char string form).
+    {2950, "uuid", Ecto.UUID, "Ecto.UUID.raw()"},
     {3802, "jsonb", :map, "map()"}
   ]
 
