@@ -19,7 +19,7 @@ IDE-readable `.ex` wrapper with a precise `@spec` next to each query.
    **parameter types** and **result column names + types** — without executing
    it.
 4. It maps the PostgreSQL type OIDs to Ecto types and Elixir typespecs
-   (`int4 → integer()`, `text → String.t()`, `uuid → String.t()`, enums to atom
+   (`int4 → integer()`, `text → String.t()`, `uuid → Ecto.UUID.raw()`, enums to atom
    unions, arrays to lists, …) and runs `EXPLAIN (generic_plan)` to learn each
    result column's **nullability** (so `LEFT JOIN` columns are typed `| nil`).
 5. It generates a typed wrapper module **next to** the `.sql` file
@@ -265,7 +265,7 @@ placeholder (e.g. `where author_id = $1` → `author_id`). Recognised shapes:
 | `float4` / `float8` | `:float` | `float()` |
 | `numeric` | `:decimal` | `Decimal.t()` |
 | `text` / `varchar` / `bpchar` / `char` / `name` | `:string` | `String.t()` |
-| `uuid` | `Ecto.UUID` | `String.t()` |
+| `uuid` | `Ecto.UUID` | `Ecto.UUID.raw()` (the raw 16-byte binary Postgrex returns) |
 | `bytea` | `:binary` | `binary()` |
 | `json` / `jsonb` | `:map` | `map()` |
 | `date` | `:date` | `Date.t()` |
