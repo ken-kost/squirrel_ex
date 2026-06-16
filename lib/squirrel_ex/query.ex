@@ -84,6 +84,26 @@ defmodule SquirrelEx.Query do
   end
 
   @doc """
+  Returns the machine-readable metadata for `query`: `%{sql, params, columns}`.
+
+  This is the single source of truth for the shape exposed both by the generated
+  `__squirrel__/0` accessor and by `SquirrelEx.Introspection.metadata/3`. The
+  `:type` fields are Elixir typespec strings; `:ecto` is the closest Ecto type
+  (precise where the typespec is lossy, e.g. `uuid` → `Ecto.UUID`).
+  """
+  @spec metadata(t()) :: %{sql: String.t(), params: [map()], columns: [map()]}
+  def metadata(%Query{} = query) do
+    %{
+      sql: query.sql,
+      params: Enum.map(query.params, fn p -> %{name: p.name, type: p.typespec, ecto: p.ecto} end),
+      columns:
+        Enum.map(query.columns, fn c ->
+          %{name: c.key, type: c.typespec, ecto: c.ecto, nullable: c.nullable, enum: c.enum}
+        end)
+    }
+  end
+
+  @doc """
   Derives the output module name, e.g. `("MyApp.Sql", ".../list_posts.sql")`
   becomes `"MyApp.Sql.ListPosts"`.
   """

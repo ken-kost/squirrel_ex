@@ -86,31 +86,33 @@ defmodule SquirrelEx.Codegen do
   # `"String.t()"` but ecto `Ecto.UUID`, and Postgrex hands back a 16-byte binary.
   # Avoids re-introspecting or parsing the generated source.
   defp squirrel_meta(%Query{} = query) do
-    params =
-      Enum.map_join(query.params, ", ", fn p ->
-        "%{name: #{inspect(p.name)}, type: #{inspect(p.typespec)}, ecto: #{render_ecto(p.ecto)}}"
-      end)
-
-    columns =
-      Enum.map_join(query.columns, ", ", fn c ->
-        "%{name: #{inspect(c.key)}, type: #{inspect(c.typespec)}, ecto: #{render_ecto(c.ecto)}, " <>
-          "nullable: #{c.nullable}, enum: #{inspect(c.enum)}}"
-      end)
+    meta = Query.metadata(query)
+    params = render_maps(meta.params, [:name, :type, :ecto])
+    columns = render_maps(meta.columns, [:name, :type, :ecto, :nullable, :enum])
 
     """
 
       @doc false
       @spec __squirrel__() :: %{sql: String.t(), params: [map()], columns: [map()]}
       def __squirrel__ do
-        %{sql: @sql, params: [#{params}], columns: [#{columns}]}
+        %{sql: @sql, params: #{params}, columns: #{columns}}
       end
     """
   end
 
-  # Renders an Ecto type as a literal in the generated source. `inspect/1`
-  # produces valid Elixir for the values Oid emits: atoms (`:integer`), modules
-  # (`Ecto.UUID`, `Ecto.Enum`), `{:array, _}` tuples, and `nil`.
-  defp render_ecto(ecto), do: inspect(ecto)
+  # Renders a list of metadata maps as a literal, with a fixed key order.
+  # `inspect/1` produces valid Elixir for every value involved: strings, atoms
+  # (`:integer`), modules (`Ecto.UUID`, `Ecto.Enum`), `{:array, _}` tuples,
+  # booleans, lists, and `nil`.
+  defp render_maps(maps, keys) do
+    rendered =
+      Enum.map_join(maps, ", ", fn map ->
+        fields = Enum.map_join(keys, ", ", fn k -> "#{k}: #{inspect(Map.fetch!(map, k))}" end)
+        "%{#{fields}}"
+      end)
+
+    "[" <> rendered <> "]"
+  end
 
   defp moduledoc(%Query{doc: nil} = query) do
     inspect("Generated from `#{query.rel_path}`.")
